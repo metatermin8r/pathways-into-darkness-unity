@@ -86,6 +86,50 @@ namespace Pid
         public int? variation;
     }
 
+    /// door_list entry. `direction` names the edge the panel RETRACTS INTO, not the
+    /// plane the panel occupies. On Ground Floor all three doors sit in a one-tile gap
+    /// with two void sides; the void-facing edges carry the 128/13 jambs, and the edges
+    /// you walk through carry wall_type 0. The panel itself has no map geometry - it is
+    /// built from `texture` and spans the tile perpendicular to the travel axis.
+    public class PidDoorDef
+    {
+        public int index;
+        public int x, y;
+        public int direction;        // 0 x_negative, 1 y_negative, 2 x_positive, 3 y_positive
+        public string direction_name;
+        public int texture;
+        public bool referenced_by_type2;
+    }
+
+    /// level_change_list entry. dest_x/dest_y are coordinates on dest_level - the export
+    /// has already resolved the cross-level scan, so these are where the player lands.
+    public class PidLevelChange
+    {
+        public int index;
+        public int source_level;
+        public string source_name;
+        public int dest_level;
+        public int dest_x, dest_y;
+        public int type;             // 0 upward, 1 downward, 2 secret_downward, 3 secret_upward
+        public string type_name;
+        public bool live;
+        public bool empty;
+        public bool referenced_by_type3;
+    }
+
+    /// Where the player lands when entering this level from somewhere else. Arrival
+    /// coordinates live in the SOURCE level's level_change_list, so the export has
+    /// already done the cross-level scan; these are resolved entries pointing here.
+    public class PidArrival
+    {
+        public int x, y;
+        public int from_level;
+        public string from_name;
+        public int change_type;
+        public string change_type_name;
+        public int list_index;
+    }
+
     public class PidLevel
     {
         public string format;
@@ -97,6 +141,9 @@ namespace Pid
         public int height10;
         public List<PidTextureRef> texture_list;
         public List<PidSector> sectors;      // 1024, row-major
+        public List<PidArrival> arrivals;
+        public List<PidDoorDef> doors;        // 15 slots, most unreferenced
+        public List<PidLevelChange> level_changes;  // 20 slots, unused have type -1
 
         public bool InBounds(int x, int y) =>
             x >= 0 && y >= 0 && x < PidConst.Grid && y < PidConst.Grid;
@@ -354,13 +401,44 @@ namespace Pid
             r.components = id;
             r.largestComponent = largest;
             r.unreachable = new List<string>();
-            for (int i = 0; i < n; i++)
+
+            // A level being split into several walkable regions is NORMAL and intended.
+            // Level 23 has four sealed 13-tile pods, each holding four ladders, on a level
+            // called "Where Only Fools Dare Tread". Level 20 has an isolated 3x3 room that
+            // two teleporters on Happy Happy, Carnage Carnage drop into - a designed trap.
+            // Across the game 51 saves and ladders sit outside their level's largest
+            // component, and none of that is a bug.
+            //
+            // So the question is not "is everything in one piece", it is "can every piece
+            // be entered". A component containing no arrival coordinate has no way in.
+            var withArrival = new HashSet<int>();
+            if (lvl.arrivals != null)
+                foreach (var a in lvl.arrivals)
+                {
+                    if (!lvl.InBounds(a.x, a.y)) continue;
+                    int ai = a.y * PidConst.Grid + a.x;
+                    if (comp[ai] >= 0) withArrival.Add(comp[ai]);
+                }
+
+            var sizes = new int[id];
+            for (int i = 0; i < n; i++) if (comp[i] >= 0) sizes[comp[i]]++;
+
+            for (int c = 0; c < id; c++)
             {
-                var s = lvl.At(i % PidConst.Grid, i / PidConst.Grid);
-                if (s == null) continue;
-                bool goal = s.type == PidConst.TypeSave || s.type == PidConst.TypeChangeLevel;
-                if (goal && comp[i] != largestId)
-                    r.unreachable.Add($"({s.x},{s.y}) {s.type_name}");
+                if (withArrival.Contains(c)) continue;
+                if (c == largestId) continue;   // entered by whatever route brought you here
+
+                int saves = 0, ladders = 0, sx = -1, sy = -1;
+                for (int i = 0; i < n; i++)
+                {
+                    if (comp[i] != c) continue;
+                    var s = lvl.At(i % PidConst.Grid, i / PidConst.Grid);
+                    if (sx < 0) { sx = s.x; sy = s.y; }
+                    if (s.type == PidConst.TypeSave) saves++;
+                    if (s.type == PidConst.TypeChangeLevel) ladders++;
+                }
+                r.unreachable.Add($"component of {sizes[c]} tiles near ({sx},{sy}), " +
+                                  $"no arrival, {ladders} ladder(s) {saves} save(s)");
             }
         }
 
