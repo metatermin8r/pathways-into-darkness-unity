@@ -72,3 +72,49 @@ crashlytics-build.properties
 # Temporary auto-generated Android Assets
 /[Aa]ssets/[Ss]treamingAssets/aa.meta
 /[Aa]ssets/[Ss]treamingAssets/aa/*
+
+# All user-supplied PID game data goes here.
+/[Aa]ssets/[Gg]ame[Dd]ata/*
+!/[Aa]ssets/[Gg]ame[Dd]ata/README.md
+!/[Aa]ssets/[Gg]ame[Dd]ata/README.md.meta
+!/[Aa]ssets/[Gg]ame[Dd]ata/.gitkeep
+
+# Runtime data path for builds.
+/[Aa]ssets/[Ss]treaming[Aa]ssets/[Pp][Ii][Dd]/*
+!/[Aa]ssets/[Ss]treaming[Aa]ssets/[Pp][Ii][Dd]/.gitkeep
+
+# Safety net: pid-re export artefacts, wherever they land.
+L[0-9][0-9].json
+transition_graph.json
+corpses.json
+levels_summary.json
+
+# Safety net: original game files and anything unpacked from them.
+# ._* are AppleDouble resource-fork sidecars — half the game on Windows.
+*.256
+*.rsrc
+._*
+[Mm]aps
+[Ss]hapes.rsrc
+[Ss]ounds.rsrc
+Bomb?Code
+Pathways?Into?Darkness*
+
+# Disk images and archives from the original media.
+*.sit
+*.hqx
+*.dsk
+*.img
+*.dmg
+*.toast
+
+# Extracted audio. Every sound in this project comes from Sounds.rsrc.
+# If original engine audio is ever added, put it under Assets/Audio/ and
+# add an exception here rather than loosening this line.
+*.wav
+*.aiff
+*.aif
+
+# Extracted art. Same reasoning — everything comes from Shapes.rsrc.
+/[Aa]ssets/[Gg]ame[Dd]ata/**/*.png
+/[Rr]eference/
