@@ -1,10 +1,6 @@
-// PidFirstPerson.cs
-// Minimal walk-and-look controller for the Ground Floor milestone.
-// PID has no jump and no crouch, so neither is here. Gravity exists only to keep
-// the CharacterController seated on the floor quads.
-//
-// Attach to a capsule that has a CharacterController. Put the camera on a child
-// object; the body yaws, the camera pitches.
+//PidFirstPerson.cs
+//Minimal walk-and-look controller, modern character controller values like Gravity exist only to keep
+//the CharacterController properly on the ground.
 
 using UnityEngine;
 
@@ -14,7 +10,7 @@ namespace Pid
     public class PidFirstPerson : MonoBehaviour
     {
         [Header("Movement")]
-        public float walkSpeed = 3.0f;      // one sector per second, handy for counting tiles
+        public float walkSpeed = 3.0f; //basically one sector per second
         public float gravity = -9.81f;
 
         [Header("Look")]
@@ -50,7 +46,7 @@ namespace Pid
                 Cursor.visible = true;
             }
 
-            // ---- look ----
+            //******LOOK******
             float mx = Input.GetAxisRaw("Mouse X") * mouseSensitivity;
             float my = Input.GetAxisRaw("Mouse Y") * mouseSensitivity;
             transform.Rotate(Vector3.up, mx, Space.World);
@@ -58,7 +54,7 @@ namespace Pid
             if (cameraPivot != null)
                 cameraPivot.localRotation = Quaternion.Euler(pitch, 0f, 0f);
 
-            // ---- move ----
+            //******MOVE******
             var input = new Vector3(Input.GetAxisRaw("Horizontal"), 0f,
                                     Input.GetAxisRaw("Vertical"));
             if (input.sqrMagnitude > 1f) input.Normalize();
@@ -70,8 +66,7 @@ namespace Pid
 
             cc.Move(move * Time.deltaTime);
 
-            // ---- which sector am I standing on ----
-            // Inverse of the mapping in PidLevelMesher: x = X/S, y = -Z/S.
+            //Log what sector we're standing on for debug and map testing purposes
             if (logSector)
             {
                 var p = transform.position;

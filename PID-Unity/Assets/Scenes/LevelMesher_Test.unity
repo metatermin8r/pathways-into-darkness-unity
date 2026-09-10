@@ -208,6 +208,7 @@ GameObject:
   - component: {fileID: 635925163}
   - component: {fileID: 635925162}
   - component: {fileID: 635925161}
+  - component: {fileID: 635925164}
   m_Layer: 0
   m_Name: Camera
   m_TagString: Untagged
@@ -224,7 +225,7 @@ Transform:
   m_GameObject: {fileID: 635925159}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 0.65, z: 0}
+  m_LocalPosition: {x: 0, y: 0.6, z: 0}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -291,8 +292,8 @@ Camera:
   m_GameObject: {fileID: 635925159}
   m_Enabled: 1
   serializedVersion: 2
-  m_ClearFlags: 1
-  m_BackGroundColor: {r: 0.19215687, g: 0.3019608, b: 0.4745098, a: 0}
+  m_ClearFlags: 2
+  m_BackGroundColor: {r: 0, g: 0, b: 0, a: 0}
   m_projectionMatrixMode: 1
   m_GateFitMode: 2
   m_FOVAxisMode: 0
@@ -333,6 +334,21 @@ Camera:
   m_OcclusionCulling: 1
   m_StereoConvergence: 10
   m_StereoSeparation: 0.022
+--- !u!114 &635925164
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 635925159}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: bc5484fdf20ff424187f053466dcd29a, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::Pid.PidBackdrop
+  backdropMaterial: {fileID: 0}
+  backdropShader: {fileID: 4800000, guid: b6387ce1ceb516a40b2c9a271bad42f7, type: 3}
+  shade: {fileID: 1968493869}
 --- !u!1 &1568009535
 GameObject:
   m_ObjectHideFlags: 0
@@ -470,9 +486,10 @@ GameObject:
   m_Component:
   - component: {fileID: 1968493867}
   - component: {fileID: 1968493868}
+  - component: {fileID: 1968493869}
   m_Layer: 0
   m_Name: LevelLoader
-  m_TagString: Untagged
+  m_TagString: MainCamera
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
@@ -530,15 +547,74 @@ MonoBehaviour:
   - {fileID: 4900000, guid: 7ecc20ed057cabb46a73fc0f94ff515d, type: 3}
   - {fileID: 4900000, guid: ddedfc7aaff367d4e8a3a85b193461a4, type: 3}
   - {fileID: 4900000, guid: bb681615f9a94294d82fc9e8301ed5ad, type: 3}
+  textureManifest: {fileID: 4900000, guid: 5567fb1e495811c44b660dfdf68cbfee, type: 3}
+  objectJsons:
+  - {fileID: 4900000, guid: ac1474d37a3ff594e8872a66e4be22da, type: 3}
+  - {fileID: 4900000, guid: 816a70d5ae8175f469718143862e5823, type: 3}
+  - {fileID: 4900000, guid: 1bbf7f0a64ffff347a1acea552a86e7b, type: 3}
+  - {fileID: 4900000, guid: a459853536c85aa4cb2b2409e192453a, type: 3}
+  - {fileID: 4900000, guid: 93bbd92a4ec3b2941803baaedb52230f, type: 3}
+  - {fileID: 4900000, guid: 2edd321bba02ca140a867f066a9946d9, type: 3}
+  - {fileID: 4900000, guid: a9165856287d74d4bab0560497a7b20a, type: 3}
+  - {fileID: 4900000, guid: b930e3c683167344bb40d4f914eb02d6, type: 3}
+  - {fileID: 4900000, guid: 29563dc56fd586343852df193ad79eda, type: 3}
+  - {fileID: 4900000, guid: c353fc478b4ff0f439f706fe4877d2a1, type: 3}
+  - {fileID: 4900000, guid: a81f7b9595e9ed342aa3d24c84808557, type: 3}
+  - {fileID: 4900000, guid: e3de674adc7afac4e83187065c1da8ff, type: 3}
+  - {fileID: 4900000, guid: 230323c96bf2f3f4384b5bbbf4066993, type: 3}
+  - {fileID: 4900000, guid: 69ec81fa65a443f46a94fcc9be116f5a, type: 3}
+  - {fileID: 4900000, guid: e7da28685a1de8e42899ac6b42af313b, type: 3}
+  - {fileID: 4900000, guid: ad571d82df8fa244a94c26ae1883db52, type: 3}
+  - {fileID: 4900000, guid: a49ac20c2bd30a845adf53e66d580dc0, type: 3}
+  - {fileID: 4900000, guid: 6c7d9afbd9548b24087fb2006c4d4775, type: 3}
+  - {fileID: 4900000, guid: e6ff3935e60d568469e4858276065f1a, type: 3}
+  - {fileID: 4900000, guid: 8591da6431d5c13479514f2e2ac29e22, type: 3}
+  - {fileID: 4900000, guid: 5b408763f3950ff4799fc5c3b79c2964, type: 3}
+  - {fileID: 4900000, guid: 83c783dce7147c34dbcd890b0a3b5114, type: 3}
+  - {fileID: 4900000, guid: b2637d43307f9fd44b0fe5b9089139e0, type: 3}
+  - {fileID: 4900000, guid: ceeacd04517df244d86175592d22893f, type: 3}
+  - {fileID: 4900000, guid: cd4dc262339395147ae469d0f1231b17, type: 3}
   flatMaterial: {fileID: 2100000, guid: 6ddd2a3c8c5f89242a883c36b7a8e879, type: 2}
+  floorMaterial: {fileID: 2100000, guid: 374f767ec73b66545839389021caa1d2, type: 2}
+  ceilingMaterial: {fileID: 2100000, guid: 374f767ec73b66545839389021caa1d2, type: 2}
+  wallMaterialTemplate: {fileID: 2100000, guid: 6ddd2a3c8c5f89242a883c36b7a8e879, type: 2}
   doorMaterial: {fileID: 2100000, guid: 25878b075869c6745a4f7b1611e68738, type: 2}
+  tileResourcePath: PidTiles
+  lutResourcePath: PidLuts
+  changeLevelMaterial: {fileID: 2100000, guid: 23785eb549a4dfc479b80ccfeeeea26d, type: 2}
+  saveMaterial: {fileID: 2100000, guid: dcc9b06f83f1a1d44aba68daf49acf36, type: 2}
+  triggerMaterial: {fileID: 2100000, guid: 812735cae762fe14ba6f87ac8c820fa1, type: 2}
+  doorTileMaterial: {fileID: 2100000, guid: 25878b075869c6745a4f7b1611e68738, type: 2}
+  corpseMaterial: {fileID: 2100000, guid: d9e02609a580bcb448702a896011e233, type: 2}
   player: {fileID: 444989731}
   startLevel: 0
-  startSector: {x: 16, y: 30}
+  startSector: {x: 16, y: 16}
   eyeHeight: 1
+  applyOriginalFov: 1
+  billboardMaterialTemplate: {fileID: 2100000, guid: 4827616549695644f8211f467016c34c, type: 2}
+  spawnObjects: 1
+  playerCamera: {fileID: 635925163}
+  logObjectSizes: 1
+  drawMissingTiles: 0
+  pixelsPerSector: 113
+  defaultObjectSize: 0.8
   openOnApproach: 1
   logCounts: 1
   logSectorHop: 1
+--- !u!114 &1968493869
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1968493865}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 4d9ed997e8c305d4f841cb4110869ef0, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::PidShade
+  flashlightOn: 0
+  gogglesOn: 0
 --- !u!1 &2044876276
 GameObject:
   m_ObjectHideFlags: 0

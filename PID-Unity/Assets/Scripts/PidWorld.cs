@@ -1,11 +1,5 @@
-// PidWorld.cs
-// Supersedes PidLevelLoader. Delete PidLevelLoader.cs - two components both building
-// geometry into the same scene will fight.
-//
-// Owns: the level catalogue, the current level's geometry, its doors, and level
-// transitions. Everything keys off which sector the player is standing on, computed
-// from their transform each frame. No trigger volumes: a grid game already knows where
-// you are, and 1,024 collider objects per level to rediscover it would be absurd.
+//Handles the level list, the current level's geometry, doors, materials, and moves you between levels at transition sectors
+//Which sector you're standing on gets worked out from your transform each frame. "Triggers" like level transitions are hardcoded sectors
 
 using System.Collections.Generic;
 using Newtonsoft.Json;
@@ -13,47 +7,143 @@ using UnityEngine;
 
 namespace Pid
 {
+    //World objects like corpses and pillars, from the save file rather than the map JSON, because that's where PID keeps them
+    public class PidObject
+    {
+        public int index;
+        public int x_raw, y_raw;      //10-bit fixed point, 1024 to a sector
+        public int descriptor;        //tag 6, selecting resources 128-191
+        public int flags;
+        public int link;              //$FFFF end of chain
+
+        public bool IsFree => link == 0xFFFE;
+        public int SectorX => x_raw >> 10;
+        public int SectorY => y_raw >> 10;
+    }
+
+    public class PidObjectSet
+    {
+        public int level;
+        public List<PidObject> objects;
+    }
+
     public class PidWorld : MonoBehaviour
     {
         [Header("Data")]
-        [Tooltip("L00.json .. L24.json. Order does not matter; indexed by level_number.")]
+        [Tooltip("L00.json .. L24.json, order does not matter since its indexed by level_number")]
         public TextAsset[] levelJsons;
+        [Tooltip("manifest.json goes here, without it walls fall back to flatMaterial")]
+        public TextAsset textureManifest;
+        [Tooltip("objects_L00.json .. objects_L24.json, exported from a save file's world blocks")]
+        public TextAsset[] objectJsons;
 
         [Header("Rendering")]
+        [Tooltip("Fallback for any wall whose tile could not be resolved")]
         public Material flatMaterial;
+        [Tooltip("Floor mat, goes unused since the floor isn't real in PID proper")]
+        public Material floorMaterial;
+        [Tooltip("Ceiling mat, same as the floor it goes unused since its not rendered in PID proper")]
+        public Material ceilingMaterial;
+        [Tooltip("Template for wall materials generated at runtime")]
+        public Material wallMaterialTemplate;
         public Material doorMaterial;
+        [Tooltip("Resources subfolder holding the tile PNGs")]
+        public string tileResourcePath = "PidTiles";
+        [Tooltip("Resources subfolder holding the LUT PNGs")]
+        public string lutResourcePath = "PidLuts";
+
+        [Header("Sector markers (debug stuff)")]
+        public Material changeLevelMaterial;
+        public Material saveMaterial;
+        public Material triggerMaterial;
+        public Material doorTileMaterial;
+        public Material corpseMaterial;
 
         [Header("Player")]
         public GameObject player;
         public int startLevel = 0;
-        public Vector2Int startSector = new Vector2Int(16, 30);
-        public float eyeHeight = 1.0f;
+        //Ground Floor's real start, hard coded from seeing it in-game in the emulator because I CAN'T FIND WHERE THE GAME SETS THIS
+        public Vector2Int startSector = new Vector2Int(16, 16);
+        [Tooltip("Camera height, PID sets this at 614/1023 of a wall sector, use this as a manual override otherwise leave at 0 and it'll sort itself")]
+        public float eyeHeight = 0f;
+        [Tooltip("Use PID's fixed 61.93 degree vertical FOV")]
+        public bool applyOriginalFov = true;
+
+        [Header("Objects")]
+        [Tooltip("Template for billboard materials")]
+        public Material billboardMaterialTemplate;
+        public bool spawnObjects = true;
+        [Tooltip("Camera the billboards turn to face, should be Camera.main")]
+        public Camera playerCamera;
+        [Tooltip("(DEBUG) Log the first few objects resolved world sizes")]
+        public bool logObjectSizes = true;
+        [Tooltip("Draw a placeholder where a wall descriptor has no tile (probably should depreciate)")]
+        public bool drawMissingTiles = false;
+        [Tooltip("Pixels per sector, used to size a sprite from its tile when the manifest has no world size (it now does, should probably depreciate)")]
+        public float pixelsPerSector = 113f;
+        [Tooltip("Last-resort size in sectors when neither world size nor tile dimensions are known (DEPRECIATE)")]
+        public float defaultObjectSize = 0.8f;
 
         [Header("Doors")]
-        [Tooltip("Open when the player stands on the door tile or either walkable neighbour.")]
         public bool openOnApproach = true;
 
         [Header("Debug")]
         public bool logCounts = true;
         public bool logSectorHop = true;
+        [Tooltip("Auto-open doors when you stand next to them")]
+        public bool debugProximityDoors = true;
 
         readonly Dictionary<int, PidLevel> catalogue = new Dictionary<int, PidLevel>();
+        readonly Dictionary<int, PidObjectSet> objectSets = new Dictionary<int, PidObjectSet>();
+        readonly Dictionary<int, Material> tileMaterials = new Dictionary<int, Material>();
         readonly List<PidDoor> doors = new List<PidDoor>();
 
+        PidTextureManifest manifest;
+        bool warnedNoWorldSize;
         PidLevel current;
         GameObject levelRoot;
         Vector2Int lastSector = new Vector2Int(-1, -1);
 
-        // A ladder is two-way and symmetric: Ground Floor's (28,3) departs to level 1 AND
-        // receives from level 1. So the player ARRIVES standing on a transition tile.
-        // Without this latch the arrival immediately re-fires the transition and the two
-        // levels ping-pong forever. Armed only once the player steps off.
+        //Without this, the trigger re-fires and the player ping-pongs between two levels at frame rate
         bool transitionArmed = true;
 
         void Start()
         {
+            LoadManifest();
+            LoadObjects();
             if (!BuildCatalogue()) return;
             LoadLevel(startLevel, startSector.x, startSector.y);
+        }
+
+        void LoadManifest()
+        {
+            if (textureManifest == null)
+            {
+                Debug.LogWarning("[PID] No texture manifest; walls will use flatMaterial.");
+                return;
+            }
+            try { manifest = PidTextureManifest.Parse(textureManifest.text); }
+            catch (JsonException e) { Debug.LogError($"[PID] Manifest parse failed: {e.Message}"); }
+        }
+
+        void LoadObjects()
+        {
+            if (objectJsons == null) return;
+            foreach (var ta in objectJsons)
+            {
+                if (ta == null) continue;
+                try
+                {
+                    var set = JsonConvert.DeserializeObject<PidObjectSet>(ta.text);
+                    if (set?.objects != null) objectSets[set.level] = set;
+                }
+                catch (JsonException e)
+                {
+                    Debug.LogError($"[PID] {ta.name} failed to parse: {e.Message}");
+                }
+            }
+            if (objectSets.Count > 0)
+                Debug.Log($"[PID] objects: {objectSets.Count} level(s).");
         }
 
         bool BuildCatalogue()
@@ -84,7 +174,61 @@ namespace Pid
             return catalogue.Count > 0;
         }
 
-        // ---- level construction --------------------------------------------------
+        //**********Materials**********
+
+        //Missing tiles fall back to flatMaterial so you can see where they are.
+        Material MaterialForTile(int key, Material template = null)
+        {
+            if (tileMaterials.TryGetValue(key, out var cached)) return cached;
+
+            Material mat = null;
+            if (key != PidLevelMesher.TileKeyMissing && manifest != null)
+            {
+                PidLevelMesher.SplitTileKey(key, out int res, out int s1, out int palette);
+                var tile = manifest.Get(res)?.Get(s1);
+                string path = tile?.Png(palette);
+                if (!string.IsNullOrEmpty(path))
+                {
+                    int dot = path.LastIndexOf('.');
+                    if (dot > 0) path = path.Substring(0, dot);
+                    var tex = Resources.Load<Texture2D>($"{tileResourcePath}/{path}");
+                    if (tex != null)
+                    {
+                        //Force Point Filter here so a mis-imported asset is obvious rather than quietly blurry
+                        tex.filterMode = FilterMode.Point;
+                        tex.wrapMode = TextureWrapMode.Clamp;
+                        var src = template != null ? template
+                                : wallMaterialTemplate != null ? wallMaterialTemplate
+                                : flatMaterial;
+                        mat = src != null ? new Material(src) : null;
+                        if (mat != null)
+                        {
+                            mat.name = $"tile_{res}_{s1}_v{palette}";
+                            mat.mainTexture = tex;
+
+                            int lv = current != null ? current.level_number : 0;
+                            string lutName = PidShade.LutName(lv, res, palette);
+                            var lut = Resources.Load<Texture2D>($"{lutResourcePath}/{lutName}");
+                            if (lut != null)
+                            {
+                                lut.filterMode = FilterMode.Point;
+                                lut.wrapMode = TextureWrapMode.Clamp;
+                                mat.SetTexture("_Lut", lut);
+                            }
+                            else Debug.LogWarning($"[PID] no shade LUT {lutName}; " +
+                                                  "tile will render as raw indices.");
+                        }
+                    }
+                    else Debug.LogWarning($"[PID] tile texture not found: {tileResourcePath}/{path}");
+                }
+            }
+
+            if (mat == null) mat = flatMaterial;   //missing tiles stay visible
+            tileMaterials[key] = mat;
+            return mat;
+        }
+
+        //**********Level Construction**********
 
         public void LoadLevel(int number, int spawnX, int spawnY)
         {
@@ -95,25 +239,32 @@ namespace Pid
             }
 
             if (levelRoot != null) Destroy(levelRoot);
+            //Materials bind a level-specific LUT
+            tileMaterials.Clear();
             doors.Clear();
             current = lvl;
 
             levelRoot = new GameObject($"L{number:D2}_{lvl.name}");
             levelRoot.transform.SetParent(transform, false);
 
-            var r = PidLevelMesher.Build(lvl);
+            PidLevelMesher.drawMissingTiles = drawMissingTiles;
+            var r = PidLevelMesher.Build(lvl, manifest);
 
             if (logCounts)
                 Debug.Log($"[PID] L{lvl.level_number:D2} '{lvl.name}'  " +
                           $"nonVoid={r.nonVoid} pillars={r.pillars} walkable={r.walkable}  " +
                           $"floors={r.floorQuads} wallQuads={r.wallQuads} " +
                           $"colliderQuads={r.colliderQuads} " +
-                          $"synthPillarFaces={r.synthesizedPillarFaces} " +
-                          $"skippedSolidSolid={r.skippedSolidSolid}  " +
+                          $"pillarColliders={r.pillarBoundaryColliders} " +
+                          $"skippedSolidSolid={r.skippedSolidSolid} " +
+                          $"skippedTag0={r.skippedTagZero} missingTiles={r.missingTiles}  " +
+                          $"submeshes={r.submeshTileKey.Count + 1}  " +
                           $"components={r.components} largest={r.largestComponent}");
 
-            // Multiple components are expected and intended. Components with no way IN
-            // are not - see the note in PidLevelMesher.Connectivity.
+            if (r.missingTiles > 0)
+                Debug.LogWarning($"[PID] {r.missingTiles} wall quad(s) had no tile in the " +
+                                 "manifest and use flatMaterial.");
+
             if (r.unreachable.Count > 0)
                 Debug.LogError($"[PID] {r.unreachable.Count} walkable region(s) with no arrival " +
                                $"coordinate: {string.Join("; ", r.unreachable)}");
@@ -121,17 +272,58 @@ namespace Pid
             var geo = new GameObject("Geometry");
             geo.transform.SetParent(levelRoot.transform, false);
             geo.AddComponent<MeshFilter>().sharedMesh = r.render;
-            geo.AddComponent<MeshRenderer>().sharedMaterial = flatMaterial;
+
+            //Submesh 0 is floors, 1 is ceilings, 2+ are all wall tiles
+            var mats = new Material[r.submeshTileKey.Count + 2];
+            mats[0] = floorMaterial != null ? floorMaterial : flatMaterial;
+            mats[1] = ceilingMaterial != null ? ceilingMaterial : flatMaterial;
+            for (int i = 0; i < r.submeshTileKey.Count; i++)
+                mats[i + 2] = MaterialForTile(r.submeshTileKey[i]);
+            geo.AddComponent<MeshRenderer>().sharedMaterials = mats;
 
             var phys = new GameObject("Collision");
             phys.transform.SetParent(levelRoot.transform, false);
             phys.AddComponent<MeshCollider>().sharedMesh = r.collision;
 
+            BuildMarkers(r);
             BuildDoors(lvl);
+            BuildObjects(lvl);
             PlacePlayer(spawnX, spawnY);
 
             lastSector = new Vector2Int(spawnX, spawnY);
-            transitionArmed = false;   // we may have landed on a transition tile
+            transitionArmed = false;   //for level transitions
+        }
+
+        Material MarkerMaterialFor(int sectorType)
+        {
+            switch (sectorType)
+            {
+                case PidConst.TypeChangeLevel: return changeLevelMaterial;
+                case PidConst.TypeSave: return saveMaterial;
+                case PidConst.TypeDoorTrigger:
+                case PidConst.TypeOtherTrigger: return triggerMaterial;
+                case PidConst.TypeDoor:
+                case PidConst.TypeSecretDoor: return doorTileMaterial;
+                case PidConst.TypeCorpse: return corpseMaterial;
+                default: return null;
+            }
+        }
+
+        void BuildMarkers(PidLevelMesher.Result r)
+        {
+            if (r.markers == null || r.markers.Count == 0) return;
+            var root = new GameObject("Markers");
+            root.transform.SetParent(levelRoot.transform, false);
+
+            foreach (var kv in r.markers)
+            {
+                var mat = MarkerMaterialFor(kv.Key);
+                if (mat == null) continue;          //unassigned type: do not draw
+                var go = new GameObject($"mark_type{kv.Key}");
+                go.transform.SetParent(root.transform, false);
+                go.AddComponent<MeshFilter>().sharedMesh = kv.Value;
+                go.AddComponent<MeshRenderer>().sharedMaterial = mat;
+            }
         }
 
         void BuildDoors(PidLevel lvl)
@@ -151,73 +343,150 @@ namespace Pid
                 }
                 var def = lvl.doors[s.type_addl];
 
-                // Travel axis: the pair of opposite neighbours that are both walkable.
-                bool ns = !lvl.IsSolid(s.x, s.y - 1) && !lvl.IsSolid(s.x, s.y + 1);
-                bool ew = !lvl.IsSolid(s.x - 1, s.y) && !lvl.IsSolid(s.x + 1, s.y);
-                if (ns == ew)
+                if (def.direction < 0 || def.direction > 3)
                 {
-                    Debug.LogWarning($"[PID] door ({s.x},{s.y}) has an ambiguous travel axis " +
-                                     $"(ns={ns} ew={ew}); skipping.");
+                    Debug.LogWarning($"[PID] door ({s.x},{s.y}) direction={def.direction} " +
+                                     "out of range 0-3; skipping.");
                     continue;
                 }
 
-                // Slide direction must be PERPENDICULAR to travel, or the panel would
-                // retract along the corridor instead of into a jamb.
-                Vector3 slide;
-                bool slideIsEW;
-                switch (def.direction)
+                var go = new GameObject($"Door_{def.index}_({s.x},{s.y})_tex{def.texture}");
+                go.transform.SetParent(root.transform, false);
+                go.AddComponent<MeshFilter>();
+                var mr = go.AddComponent<MeshRenderer>();
+
+                var dr = manifest?.DoorRate(def.texture);
+                if (dr == null)
                 {
-                    case 0: slide = Vector3.left; slideIsEW = true; break;  // x_negative
-                    case 2: slide = Vector3.right; slideIsEW = true; break;  // x_positive
-                    case 1: slide = Vector3.forward; slideIsEW = false; break;  // y_negative = +Z
-                    case 3: slide = Vector3.back; slideIsEW = false; break;  // y_positive = -Z
-                    default:
-                        Debug.LogWarning($"[PID] door ({s.x},{s.y}) direction={def.direction} " +
-                                         "unrecognised; skipping.");
-                        continue;
-                }
-                if (slideIsEW != ns)
-                {
-                    // ns travel wants an east-west slide; ew travel wants north-south.
-                    Debug.LogWarning($"[PID] door ({s.x},{s.y}) slide direction " +
-                                     $"'{def.direction_name}' is parallel to travel " +
-                                     "(ns=" + ns + "). Panel would retract along the corridor. " +
-                                     "Direction 2 (x_positive) is unattested on Ground Floor - " +
-                                     "if this fires, the direction mapping needs revisiting.");
+                    Debug.LogWarning($"[PID] no door_rates row for texture {def.texture}; " +
+                                     "falling back to texture 0.");
+                    dr = new PidDoorRate { texture = 0, face_s1 = 12, cap_s1 = 13, rate = 12 };
                 }
 
-                const float T = 0.15f;    // panel thickness
-                float S = PidConst.SectorSize, H = PidConst.WallHeight;
+                //Door art lives in the wall resource
+                const int DoorResource = 192;
+                mr.sharedMaterials = new[]
+                {
+                    MaterialForTile(PidLevelMesher.TileKey(DoorResource, dr.face_s1, 0)),
+                    MaterialForTile(PidLevelMesher.TileKey(DoorResource, dr.cap_s1, 0)),
+                };
 
-                var panel = GameObject.CreatePrimitive(PrimitiveType.Cube);
-                panel.name = $"Door_{def.index}_({s.x},{s.y})_tex{def.texture}";
-                panel.transform.SetParent(root.transform, false);
-                panel.transform.localScale = ns ? new Vector3(S, H, T) : new Vector3(T, H, S);
-                if (doorMaterial != null)
-                    panel.GetComponent<MeshRenderer>().sharedMaterial = doorMaterial;
+                var d = go.AddComponent<PidDoor>();
 
-                var d = panel.AddComponent<PidDoor>();
-                d.sectorX = s.x; d.sectorY = s.y;
-                d.doorIndex = def.index; d.textureId = def.texture;
-                d.travelIsNorthSouth = ns;
-                d.Configure(PidLevelMesher.SectorCentre(s.x, s.y, H * 0.5f), slide * S);
+                d.Configure(s.x, s.y, def.index, def.texture, def.direction,
+                            PidDoor.Closed, 0, dr.rate);
+
                 doors.Add(d);
+                if (logCounts)
+                    Debug.Log($"[PID] door {def.index} ({s.x},{s.y}) dir={def.direction} " +
+                              $"tex={def.texture} rate={d.Rate}/tick " +
+                              $"full={d.TraversalSeconds:F3}s slidesY={d.SlidesY} " +
+                              $"anchorHigh={d.AnchorHigh}");
             }
 
             if (logCounts && doors.Count > 0)
                 Debug.Log($"[PID] built {doors.Count} door(s).");
         }
 
+        //One quad per object
+        void BuildObjects(PidLevel lvl)
+        {
+            if (!spawnObjects) return;
+            if (!objectSets.TryGetValue(lvl.level_number, out var set)) return;
+
+            var root = new GameObject("Objects");
+            root.transform.SetParent(levelRoot.transform, false);
+
+            int spawned = 0, unresolved = 0;
+            float unit = PidConst.RawToMetres;   //one conversion, used everywhere
+
+            foreach (var o in set.objects)
+            {
+                if (o == null || o.IsFree) continue;
+
+                int res = PidConst.Resource(o.descriptor);
+                int s1 = PidConst.S1Index(o.descriptor);
+                var tile = manifest?.Get(res)?.Get(s1);
+
+                float w, h;
+                if (tile != null && tile.world_w > 0 && tile.world_h > 0)
+                {
+                    w = tile.world_w * unit;
+                    h = tile.world_h * unit;
+                }
+                else if (tile != null && tile.width > 0 && tile.height > 0 && pixelsPerSector > 0f)
+                {
+                    w = tile.width / pixelsPerSector * PidConst.SectorSize;
+                    h = tile.height / pixelsPerSector * PidConst.SectorSize;
+                    if (!warnedNoWorldSize)
+                    {
+                        warnedNoWorldSize = true;
+                        Debug.LogWarning("[PID] manifest has no world_w/world_h; sizing sprites " +
+                                         "from tile pixels. Re-export the manifest to fix.");
+                    }
+                }
+                else
+                {
+                    w = h = defaultObjectSize * PidConst.SectorSize;
+                }
+
+                var go = GameObject.CreatePrimitive(PrimitiveType.Quad);
+                go.name = $"obj_{o.index}_res{res}_s1{s1}";
+                go.transform.SetParent(root.transform, false);
+                Destroy(go.GetComponent<Collider>());   //collision comes from the map
+
+                //Sprites sit "lift" distance above the floor, which is zero for most things
+                float baseY = (tile != null ? tile.lift : 0) * unit;
+                go.transform.position = new Vector3(
+                    o.x_raw * unit, baseY + h * 0.5f, -(o.y_raw * unit));
+                go.transform.localScale = new Vector3(w, h, 1f);
+
+                //Object sprites aren't in any level's texture list
+                int key = PidLevelMesher.TileKey(res, s1, 0);
+                var mat = MaterialForTile(key, billboardMaterialTemplate);
+                if (mat == flatMaterial) unresolved++;
+                go.GetComponent<MeshRenderer>().sharedMaterial = mat;
+
+                var b = go.AddComponent<PidBillboard>();
+                if (playerCamera != null) b.camOverride = playerCamera;
+                b.objectIndex = o.index; b.descriptor = o.descriptor;
+                b.resource = res; b.s1Index = s1;
+                b.flags = o.flags; b.nextLink = o.link;
+                b.rawPosition = new Vector2(o.x_raw, o.y_raw);
+
+                if (logObjectSizes && spawned < 8)
+                    Debug.Log($"[PID] obj {o.index} res{res} s1{s1} " +
+                              $"raw({o.x_raw},{o.y_raw}) sector({o.SectorX},{o.SectorY}) " +
+                              $"tile={(tile == null ? "null" : $"{tile.width}x{tile.height}")} " +
+                              $"world=({(tile?.world_w ?? 0)},{(tile?.world_h ?? 0)}) " +
+                              $"world=({tile?.world_w ?? 0},{tile?.world_h ?? 0}) lift={tile?.lift ?? 0} " +
+                              $"-> {w:F2}m x {h:F2}m");
+                spawned++;
+            }
+
+            if (logCounts)
+                Debug.Log($"[PID] objects: spawned={spawned} unresolvedSprites={unresolved}");
+        }
+
         void PlacePlayer(int x, int y)
         {
             if (player == null) return;
+            //CharacterController overwrites direct transform writes while enabled, so disable it for the teleport
             var cc = player.GetComponent<CharacterController>();
-            if (cc != null) cc.enabled = false;                 // it overwrites transform writes
-            player.transform.position = PidLevelMesher.SectorCentre(x, y, eyeHeight);
+            if (cc != null) cc.enabled = false;
+            float eye = eyeHeight > 0f ? eyeHeight : PidConst.EyeHeight;
+            player.transform.position = PidLevelMesher.SectorCentre(x, y, eye);
+
+            //Handles fixed 4:3 FOV stuff
+            if (applyOriginalFov && playerCamera != null)
+            {
+                playerCamera.fieldOfView = PidConst.VerticalFovDegrees;
+                playerCamera.usePhysicalProperties = false;
+            }
             if (cc != null) cc.enabled = true;
         }
 
-        // ---- per-frame -----------------------------------------------------------
+        //**********Per-Frame**********
 
         void Update()
         {
@@ -230,7 +499,7 @@ namespace Pid
             if (s != lastSector)
             {
                 lastSector = s;
-                transitionArmed = true;   // stepped off whatever we were on
+                transitionArmed = true;
                 if (logSectorHop)
                 {
                     var sec = current.At(s.x, s.y);
@@ -242,16 +511,19 @@ namespace Pid
             CheckTransition(s);
         }
 
+        //Placeholder for proximity open doors, since triggers aren't understood yet
         void UpdateDoors(Vector2Int at)
         {
+            if (!debugProximityDoors) return;
+
             foreach (var d in doors)
             {
-                // Open from the door tile or either walkable neighbour along travel.
                 bool near = (at.x == d.sectorX && at.y == d.sectorY) ||
-                            (d.travelIsNorthSouth
+                            (d.SlidesY
                                 ? at.x == d.sectorX && Mathf.Abs(at.y - d.sectorY) == 1
                                 : at.y == d.sectorY && Mathf.Abs(at.x - d.sectorX) == 1);
-                d.SetWanted(near);
+
+                if (near) d.Open(); else d.Close();
             }
         }
 
@@ -281,6 +553,45 @@ namespace Pid
             Debug.Log($"[PID] {e.type_name} from L{current.level_number:D2} ({at.x},{at.y}) " +
                       $"-> L{e.dest_level:D2} ({e.dest_x},{e.dest_y})");
             LoadLevel(e.dest_level, e.dest_x, e.dest_y);
+        }
+
+        //Development readout for sectors
+        void OnGUI()
+        {
+            if (current == null) return;
+
+            var sec = current.At(lastSector.x, lastSector.y);
+            string what = sec == null ? "out of bounds" : sec.type_name;
+            string extra = "";
+            if (sec != null && sec.type_addl != 0) extra = $"  addl={sec.type_addl}";
+            if (sec != null && sec.item != -1) extra += $"  item={sec.item}";
+
+            string wall = "";
+            if (sec != null && sec.walls != null && sec.walls.Count >= 2)
+            {
+                int w0 = sec.walls[0].Word, w1 = sec.walls[1].Word;
+                wall = $"N ${w0:X4} tag{PidConst.Tag(w0)} res{PidConst.Resource(w0)} " +
+                       $"s1={PidConst.S1Index(w0)}   " +
+                       $"W ${w1:X4} tag{PidConst.Tag(w1)} res{PidConst.Resource(w1)} " +
+                       $"s1={PidConst.S1Index(w1)}";
+            }
+
+            var style = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 14,
+                alignment = TextAnchor.UpperLeft,
+                normal = { textColor = Color.white }
+            };
+
+            GUI.color = new Color(0f, 0f, 0f, 0.55f);
+            GUI.DrawTexture(new Rect(6, 6, 660, 78), Texture2D.whiteTexture);
+            GUI.color = Color.white;
+
+            GUI.Label(new Rect(12, 10, 700, 96),
+                $"L{current.level_number:D2}  {current.name}\n" +
+                $"sector ({lastSector.x},{lastSector.y})  {what}{extra}\n" +
+                wall,
+                style);
         }
     }
 }

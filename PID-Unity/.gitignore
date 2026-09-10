@@ -73,6 +73,30 @@ crashlytics-build.properties
 /[Aa]ssets/[Ss]treamingAssets/aa.meta
 /[Aa]ssets/[Ss]treamingAssets/aa/*
 
+# Extracted .256 tiles as R8 palette-index maps, and the per-level shade
+# LUTs: roughly 654 and 211 PNGs, plus a .meta each. Whole FOLDERS are
+# ignored rather than *.png, so a future export format cannot slip data in
+# unnoticed. Unity needs the folders to exist, so keep a .gitkeep in each.
+/[Aa]ssets/[Rr]esources/[Pp]id[Tt]iles/*
+!/[Aa]ssets/[Rr]esources/[Pp]id[Tt]iles/.gitkeep
+/[Aa]ssets/[Rr]esources/[Pp]id[Ll]uts/*
+!/[Aa]ssets/[Rr]esources/[Pp]id[Ll]uts/.gitkeep
+
+# Exported levels and the texture manifest, if kept under Resources rather
+# than GameData. The manifest is renamed .txt or .bytes so Unity imports it
+# as a TextAsset, which slips past a plain *.json rule.
+/[Aa]ssets/[Rr]esources/[Pp]id[Ll]evels/*
+!/[Aa]ssets/[Rr]esources/[Pp]id[Ll]evels/.gitkeep
+*[Mm]anifest.json.txt
+*[Mm]anifest.json.bytes
+
+# Save files, originals and anything the save editor produces.
+*.sav
+*.sav.meta
+
+# Tool output: reports, dumps and re-exports, all reproducible.
+/out/
+
 # All user-supplied PID game data goes here.
 /[Aa]ssets/[Gg]ame[Dd]ata/*
 !/[Aa]ssets/[Gg]ame[Dd]ata/README.md

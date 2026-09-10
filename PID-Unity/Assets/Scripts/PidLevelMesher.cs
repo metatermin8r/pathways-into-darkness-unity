@@ -1,33 +1,9 @@
-// PidLevelMesher.cs
-// Pathways Into Darkness -> Unity. Milestone 1: flat-shaded walkable level.
-//
-// Deserializes pid_level_v1 (pid-re/reference/export/L##.json) with Newtonsoft.
-// Unity's JsonUtility cannot read this format: texture_list carries nullable ints
-// (shape_id, variation) and the schema nests objects several levels deep.
-// Package Manager -> com.unity.nuget.newtonsoft-json
-//
-// COORDINATE MAPPING
-//   Game grid is 32x32, index = y*32 + x, x rightward, y DOWNWARD (southward).
-//   Unity Z increases north, so game y maps to NEGATIVE Z.
-//   Sector (x,y) occupies world X in [x*S, (x+1)*S], Z in [-(y+1)*S, -y*S].
-//   Its NORTH edge (game -Y) is the Z = -y*S plane.
-//   Its WEST  edge (game -X) is the X =  x*S plane.
-//   If the level renders mirrored or rotated, it is the Z sign.
-//
-// EDGE OWNERSHIP
-//   walls[0] (slot "wall_y") is the sector's OWN north edge.
-//   walls[1] (slot "wall_x") is the sector's OWN west edge.
-//   Every edge in the grid is described exactly once, by the cell to its south or
-//   east. Emitting all four edges per cell would double every interior wall.
-//
-// BLOCKING
-//   Read from wall.blocks_movement, never inferred here. The export sets it from
-//   its own movement_rule ("{32}" on this level: 679 type-32 walls true, all 329
-//   short walls and corners false). A parser change should not need an engine
-//   change - that boundary is the point of the two repos.
+//Turns a level's sector grid (from a JSON file) into Unity meshes.
+//Floors and ceilings are built for collision only, because the original doesn't draw either
 
 using System.Collections.Generic;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using UnityEngine;
 
 namespace Pid
@@ -35,34 +11,168 @@ namespace Pid
     public static class PidConst
     {
         public const int Grid = 32;
-        public const float SectorSize = 3.0f;   // metres
-        public const float WallHeight = 2.6f;   // just under the ~2.7 m inter-level spacing
+        public const float SectorSize = 3.0f;
 
-        // sector type
+        //1024 raw units to a sector
+        public const int RawUnitsPerSector = 1024;
+
+        //In PID the floor sits 614 below the eye and the ceiling 409 above, so a wall is 1023 tall and you're standing at 60% of its height
+        public const int EyeToFloorRaw = 614;
+        public const int EyeToCeilingRaw = 409;
+        public const int CeilingRawUnits = EyeToFloorRaw + EyeToCeilingRaw;   //Should always be 1023
+
+        //Wall tiles are square, so wall height is sector size
+        public const float WallHeight =
+            SectorSize * CeilingRawUnits / (float)RawUnitsPerSector;
+
+        //One conversion for everything so the scales can't drift apart
+        public const float RawToMetres = SectorSize / RawUnitsPerSector;
+
+        //Eye height never changes
+        public const float EyeHeight = SectorSize * EyeToFloorRaw / (float)RawUnitsPerSector;
+
+        //Fixed, works out to a 4:3 view no matter what size the window is
+        public const float VerticalFovDegrees = 61.927513f;
+
         public const int TypeVoid = 0, TypeNormal = 1, TypeDoor = 2, TypeChangeLevel = 3,
                          TypeDoorTrigger = 4, TypeSecretDoor = 5, TypeCorpse = 6,
                          TypePillar = 7, TypeOtherTrigger = 8, TypeSave = 9;
 
-        // TEMPORARY, MILESTONE 1 ONLY.
-        // 64/96/128 are named wall_short_low / wall_short_high / wall_short_both, which
-        // SUGGESTS a low band, a high band, and both-with-a-gap. That is inference from
-        // naming, not verified against bytes. Ground Floor has 189 short walls, most of
-        // them on the world boundary, so guessing a vertical extent now would punch
-        // visible holes during the exact test we are running. Full height until .256
-        // lands and we can see what the bands actually look like.
-        public static float HeightOf(int wallType) => WallHeight;
+        //Walls and objects pack the same way, only the tag differs
+        public static int Tag(int word) => (word >> 13) & 7;
+        public static int S1Index(int word) => word & 0x7F;
+        public static int Selector(int word) => ((word >> 7) & 0x3F) + (Tag(word) == 6 ? 0 : 64);
+        //Cache slot N is resource N+128!!!
+        public static int Resource(int word) => Selector(word) + 128;
     }
 
-    // ---- pid_level_v1 schema ----------------------------------------------------
+    //Points a resource and tile index at the PNG to draw and how big it is
+
+    public class PidTile
+    {
+        public int s1_index;
+        public int cls;
+        public int width;
+        public int height;
+
+        //R8 index map: Pixels are palette indices, so one file covers every colour variation, and the LUT does the colouring
+        public string png;
+
+        //Sprite size in raw units, zero on wall tiles
+        public int world_w;
+        public int world_h;
+
+        //How far off the floor the sprite sits, probably not needed since we now have floor/ceiling rendering (or lack there off) solved
+        public int lift;
+
+        //Palette is ignored, kept so call sites don't have to change
+        public string Png(int palette) => png;
+    }
+
+    public class PidDoorRate
+    {
+        //Which tiles a door uses, looked up by its texture number
+        public int texture;
+        public int face_s1;
+        public int cap_s1;
+
+        //Raw units per tick (used for movement math)
+        public int rate;
+    }
+    public class PidResourceTiles
+    {
+        public int resource;
+        public int table_count;   //colour tables this resource carries
+        public int full_height;   //manifest's value
+        public List<PidTile> tiles;
+
+        Dictionary<int, PidTile> byIndex;
+        int fullH = -1;
+
+        //Take the tallest class-1 tile, not the first
+        public int FullHeight
+        {
+            get
+            {
+                if (fullH < 0)
+                {
+                    fullH = 0;
+                    if (tiles != null)
+                        foreach (var t in tiles)
+                            if (t.cls == 1 && t.height > fullH) fullH = t.height;
+                    if (fullH == 0) fullH = full_height;   //sprite-only resources
+                }
+                return fullH;
+            }
+        }
+
+        public PidTile Get(int s1Index)
+        {
+            if (byIndex == null)
+            {
+                byIndex = new Dictionary<int, PidTile>();
+                if (tiles != null)
+                    foreach (var t in tiles) byIndex[t.s1_index] = t;
+            }
+            return byIndex.TryGetValue(s1Index, out var tile) ? tile : null;
+        }
+    }
+
+    public class PidLevelTextures
+    {
+        public int wall_resource;
+        public int wall_variation;
+    }
+
+    public class PidTextureManifest
+    {
+        public List<PidResourceTiles> resources; //Which wall resource and colour table each level uses
+        public Dictionary<string, PidLevelTextures> levels;
+
+        Dictionary<int, PidResourceTiles> byId;
+
+        public PidLevelTextures ForLevel(int n) =>
+            levels != null && levels.TryGetValue(n.ToString(), out var l) ? l : null;
+
+        //Multiple levels share the same texture resources, colored differently with the LUTs
+        public int VariationFor(int level) => ForLevel(level)?.wall_variation ?? 0;
+
+        public PidResourceTiles Get(int resource)
+        {
+            if (byId == null)
+            {
+                byId = new Dictionary<int, PidResourceTiles>();
+                if (resources != null)
+                    foreach (var r in resources) byId[r.resource] = r;
+            }
+            return byId.TryGetValue(resource, out var res) ? res : null;
+        }
+
+        public static PidTextureManifest Parse(string json) =>
+            JsonConvert.DeserializeObject<PidTextureManifest>(json);
+
+        public List<PidDoorRate> door_rates;
+
+        public PidDoorRate DoorRate(int texture)
+        {
+            if (door_rates == null) return null;
+            foreach (var r in door_rates) if (r.texture == texture) return r;
+            return null;
+        }
+    }
+
+    //**********LEVEL SCHEMA**********
 
     public class PidWall
     {
         public int index;
-        public string slot;          // "wall_y" (north), "wall_x" (west), then 4 corners
-        public int type;          // 0, 1, 32, 33, 64, 96, 128, 160
+        public string slot;
+        public int type; //Descriptor's high byte
         public string type_name;
-        public int texture;
+        public int texture;       //Descriptor's low byte
         public bool blocks_movement;
+
+        public int Word => ((type & 0xFF) << 8) | (texture & 0xFF);
     }
 
     public class PidSector
@@ -73,77 +183,43 @@ namespace Pid
         public string type_name;
         public int type_addl;
         public int item;
-        public List<PidWall> walls;   // 6
+        public List<PidWall> walls;
 
         public bool IsVoid => type == PidConst.TypeVoid;
         public bool IsPillar => type == PidConst.TypePillar;
     }
 
-    public class PidTextureRef
+    public class PidTextureRef { public int raw; public int? shape_id; public int? variation; }
+
+    public class PidArrival
     {
-        public int raw;
-        public int? shape_id;     // null where raw == -1. This is why JsonUtility fails.
-        public int? variation;
+        public int x, y, from_level, change_type, list_index;
+        public string from_name, change_type_name;
     }
 
-    /// door_list entry. `direction` names the edge the panel RETRACTS INTO, not the
-    /// plane the panel occupies. On Ground Floor all three doors sit in a one-tile gap
-    /// with two void sides; the void-facing edges carry the 128/13 jambs, and the edges
-    /// you walk through carry wall_type 0. The panel itself has no map geometry - it is
-    /// built from `texture` and spans the tile perpendicular to the travel axis.
     public class PidDoorDef
     {
-        public int index;
-        public int x, y;
-        public int direction;        // 0 x_negative, 1 y_negative, 2 x_positive, 3 y_positive
+        public int index, x, y, direction, texture;
         public string direction_name;
-        public int texture;
         public bool referenced_by_type2;
     }
 
-    /// level_change_list entry. dest_x/dest_y are coordinates on dest_level - the export
-    /// has already resolved the cross-level scan, so these are where the player lands.
     public class PidLevelChange
     {
-        public int index;
-        public int source_level;
-        public string source_name;
-        public int dest_level;
-        public int dest_x, dest_y;
-        public int type;             // 0 upward, 1 downward, 2 secret_downward, 3 secret_upward
-        public string type_name;
-        public bool live;
-        public bool empty;
-        public bool referenced_by_type3;
-    }
-
-    /// Where the player lands when entering this level from somewhere else. Arrival
-    /// coordinates live in the SOURCE level's level_change_list, so the export has
-    /// already done the cross-level scan; these are resolved entries pointing here.
-    public class PidArrival
-    {
-        public int x, y;
-        public int from_level;
-        public string from_name;
-        public int change_type;
-        public string change_type_name;
-        public int list_index;
+        public int index, source_level, dest_level, dest_x, dest_y, type;
+        public string source_name, type_name;
+        public bool live, empty, referenced_by_type3;
     }
 
     public class PidLevel
     {
-        public string format;
-        public string movement_rule;
-        public int grid;
-        public int record_size;
-        public int level_number;
-        public string name;
-        public int height10;
+        public string format, movement_rule, name;
+        public int grid, record_size, level_number, height10;
         public List<PidTextureRef> texture_list;
-        public List<PidSector> sectors;      // 1024, row-major
+        public List<PidSector> sectors;
         public List<PidArrival> arrivals;
-        public List<PidDoorDef> doors;        // 15 slots, most unreferenced
-        public List<PidLevelChange> level_changes;  // 20 slots, unused have type -1
+        public List<PidDoorDef> doors;
+        public List<PidLevelChange> level_changes;
 
         public bool InBounds(int x, int y) =>
             x >= 0 && y >= 0 && x < PidConst.Grid && y < PidConst.Grid;
@@ -151,16 +227,17 @@ namespace Pid
         public PidSector At(int x, int y) =>
             InBounds(x, y) ? sectors[y * PidConst.Grid + x] : null;
 
-        /// Void and Pillar are movement-equivalent: neither has a floor you can stand on.
-        /// They differ only in which side their faces are seen from. Collapsing them into
-        /// one predicate removes every special case in the emission loop but one.
-        /// Off-grid counts as Void - the grid edge is the edge of the world.
-        public bool IsSolid(int x, int y) { var s = At(x, y); return s == null || s.IsVoid || s.IsPillar; }
+        //Only Void has no floor (everything off the level grid counts as void)
+        //PID draws floor, ceiling, and the neighbouring walls around things like pillars, with the pillar standing in front as a sprite
+        public bool IsVoidAt(int x, int y) { var s = At(x, y); return s == null || s.IsVoid; }
 
-        public int WallType(int x, int y, int slot)
+        //Pillars block like walls, despite not being walls or void
+        public bool IsBlocking(int x, int y) { var s = At(x, y); return s == null || s.IsVoid || s.IsPillar; }
+
+        public int Word(int x, int y, int slot)
         {
             var s = At(x, y);
-            return s == null ? 0 : s.walls[slot].type;
+            return s == null ? 0 : s.walls[slot].Word;
         }
 
         public bool Blocks(int x, int y, int slot)
@@ -170,45 +247,35 @@ namespace Pid
         }
     }
 
-    // ---- mesh assembly ----------------------------------------------------------
+    //**********MESH ASSEMBLY**********
 
     public class MeshAccum
     {
         public readonly List<Vector3> verts = new List<Vector3>();
         public readonly List<Vector3> norms = new List<Vector3>();
+        public readonly List<Vector2> uvs = new List<Vector2>();
         public readonly List<int> tris = new List<int>();
         public int quadCount;
 
-        /// (a,b,c,d) is front-facing from the side its normal points toward.
-        public void Quad(Vector3 a, Vector3 b, Vector3 c, Vector3 d)
+        public void Quad(Vector3 a, Vector3 b, Vector3 c, Vector3 d,
+                         Vector2 ua, Vector2 ub, Vector2 uc, Vector2 ud)
         {
             int i = verts.Count;
-            Vector3 nrm = Vector3.Cross(b - a, c - a).normalized;
+            Vector3 n = Vector3.Cross(b - a, c - a).normalized;
             verts.Add(a); verts.Add(b); verts.Add(c); verts.Add(d);
-            norms.Add(nrm); norms.Add(nrm); norms.Add(nrm); norms.Add(nrm);
+            norms.Add(n); norms.Add(n); norms.Add(n); norms.Add(n);
+            uvs.Add(ua); uvs.Add(ub); uvs.Add(uc); uvs.Add(ud);
             tris.Add(i); tris.Add(i + 1); tris.Add(i + 2);
             tris.Add(i); tris.Add(i + 2); tris.Add(i + 3);
             quadCount++;
         }
 
-        /// Two coplanar quads with opposite winding. Backface culling means exactly one
-        /// is ever drawn, so they do not z-fight, and each side gets a correct flat
-        /// normal. Levels 7-15 have hundreds of interior walls seen from both sides.
-        public void QuadBoth(Vector3 a, Vector3 b, Vector3 c, Vector3 d)
+        //Same quad twice so it's visible from either side (we do some culling to stop Z fighting issues)
+        public void QuadBoth(Vector3 a, Vector3 b, Vector3 c, Vector3 d,
+                             Vector2 ua, Vector2 ub, Vector2 uc, Vector2 ud)
         {
-            Quad(a, b, c, d);
-            Quad(d, c, b, a);
-        }
-
-        public Mesh ToMesh(string name)
-        {
-            var m = new Mesh { name = name };
-            m.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
-            m.SetVertices(verts);
-            m.SetNormals(norms);
-            m.SetTriangles(tris, 0);
-            m.RecalculateBounds();
-            return m;
+            Quad(a, b, c, d, ua, ub, uc, ud);
+            Quad(d, c, b, a, ud, uc, ub, ua);
         }
     }
 
@@ -216,8 +283,8 @@ namespace Pid
     {
         const float S = PidConst.SectorSize;
 
-        static float XW(int x) => x * S;      // west plane of column x
-        static float ZN(int y) => -y * S;     // north plane of row y
+        static float XW(int x) => x * S;
+        static float ZN(int y) => -y * S;
 
         public static Vector3 SectorCentre(int x, int y, float height = 0f) =>
             new Vector3(XW(x) + S * 0.5f, height, ZN(y) - S * 0.5f);
@@ -226,19 +293,38 @@ namespace Pid
 
         public struct Result
         {
-            public Mesh render, collision;
+            public Mesh render;
+            public Mesh collision;
+            public List<int> submeshTileKey; //Submesh 0 is floors, 1 is ceilings (now unused), tiles start at 2
+            public Dictionary<int, Mesh> markers;
             public int nonVoid, pillars, walkable;
-            public int floorQuads, wallQuads, colliderQuads, synthesizedPillarFaces, skippedSolidSolid;
+            public int floorQuads, wallQuads, colliderQuads, pillarBoundaryColliders;
+            public int skippedSolidSolid, skippedTagZero, missingTiles;
             public int components, largestComponent;
-            public List<string> unreachable;   // saves / ladders outside the main component
+            public List<string> unreachable;
         }
 
-        public static Result Build(PidLevel lvl)
+        static readonly int[] MarkedTypes =
         {
-            var vis = new MeshAccum();
+            PidConst.TypeDoor, PidConst.TypeChangeLevel, PidConst.TypeDoorTrigger,
+            PidConst.TypeSecretDoor, PidConst.TypeCorpse, PidConst.TypeOtherTrigger,
+            PidConst.TypeSave
+        };
+
+        public static Result Build(PidLevel lvl, PidTextureManifest manifest)
+        {
+            var floors = new MeshAccum();
+            var ceilings = new MeshAccum();
             var col = new MeshAccum();
+            var byTile = new Dictionary<int, MeshAccum>(); //tile key for geometry
+            var marks = new Dictionary<int, MeshAccum>();
+
             int nonVoid = 0, pillars = 0, walkable = 0;
-            int floors = 0, walls = 0, colliders = 0, synth = 0, skipped = 0;
+            int floorQuads = 0, wallQuads = 0, colliders = 0;
+            int pillarColliders = 0, skippedSolid = 0, skippedTag0 = 0, missing = 0;
+
+            //Which colour table this level's walls use
+            int palette = manifest?.VariationFor(lvl.level_number) ?? 0;
 
             for (int y = 0; y < PidConst.Grid; y++)
                 for (int x = 0; x < PidConst.Grid; x++)
@@ -247,128 +333,310 @@ namespace Pid
                     if (!s.IsVoid) nonVoid++;
                     if (s.IsPillar) pillars++;
 
-                    // ---- floor + ceiling: WALKABLE cells only ----
-                    // Floors belong to the walkable region; faces belong to individual edges.
-                    // That asymmetry is the whole trick.
-                    if (!lvl.IsSolid(x, y))
+                    if (!lvl.IsVoidAt(x, y))
                     {
                         walkable++;
                         float x0 = XW(x), x1 = XW(x + 1), zn = ZN(y), zs = ZN(y + 1);
-
-                        // Floor goes into BOTH meshes. A non-convex MeshCollider is one-sided
-                        // and follows triangle winding, so this must face +Y or the player
-                        // falls straight through it.
                         var f0 = new Vector3(x0, 0f, zn); var f1 = new Vector3(x1, 0f, zn);
                         var f2 = new Vector3(x1, 0f, zs); var f3 = new Vector3(x0, 0f, zs);
-                        vis.Quad(f0, f1, f2, f3);
-                        col.Quad(f0, f1, f2, f3);
-                        floors++;
-                        colliders++;
 
-                        // Ceiling is render-only. PID has no jump and no crouch, so nothing can
-                        // ever reach it; a collider there would only cost triangles.
-                        float h = PidConst.WallHeight;
-                        vis.Quad(new Vector3(x0, h, zs), new Vector3(x1, h, zs),
-                                 new Vector3(x1, h, zn), new Vector3(x0, h, zn));      // -Y
+                        if (drawFloors)
+                            floors.Quad(f0, f1, f2, f3, V(0, 0), V(1, 0), V(1, 1), V(0, 1));
+                        col.Quad(f0, f1, f2, f3, V(0, 0), V(1, 0), V(1, 1), V(0, 1));
+                        floorQuads++; colliders++;
+
+                        //Ceiling is render-only
+                        if (drawCeilings)
+                        {
+                            float h = PidConst.WallHeight;
+                            ceilings.Quad(new Vector3(x0, h, zs), new Vector3(x1, h, zs),
+                                          new Vector3(x1, h, zn), new Vector3(x0, h, zn),
+                                          V(0, 0), V(1, 0), V(1, 1), V(0, 1));
+                        }
+
+                        if (System.Array.IndexOf(MarkedTypes, s.type) >= 0)
+                        {
+                            if (!marks.TryGetValue(s.type, out var acc))
+                                marks[s.type] = acc = new MeshAccum();
+                            const float lift = 0.02f;
+                            acc.Quad(f0 + Vector3.up * lift, f1 + Vector3.up * lift,
+                                     f2 + Vector3.up * lift, f3 + Vector3.up * lift,
+                                     V(0, 0), V(1, 0), V(1, 1), V(0, 1));
+                        }
                     }
 
-                    EmitEdge(lvl, vis, col, x, y, 0, ref walls, ref colliders, ref synth, ref skipped);
-                    EmitEdge(lvl, vis, col, x, y, 1, ref walls, ref colliders, ref synth, ref skipped);
+                    EmitEdge(lvl, manifest, palette, byTile, col, x, y, 0,
+                             ref wallQuads, ref colliders, ref pillarColliders,
+                             ref skippedSolid, ref skippedTag0, ref missing);
+                    EmitEdge(lvl, manifest, palette, byTile, col, x, y, 1,
+                             ref wallQuads, ref colliders, ref pillarColliders,
+                             ref skippedSolid, ref skippedTag0, ref missing);
+
+                    //Slots 2-5 are the four corner diagonals, emitted from the CURRENT cell before the void skip, so void cells still
+                    //contribute chamfers
+                    for (int slot = 2; slot <= 5; slot++)
+                        EmitCorner(lvl, manifest, palette, byTile, x, y, slot,
+                                   ref wallQuads, ref missing);
                 }
 
             var r = new Result
             {
-                render = vis.ToMesh($"PID_L{lvl.level_number:D2}_render"),
-                collision = col.ToMesh($"PID_L{lvl.level_number:D2}_collision"),
+                collision = ToMesh(col, $"PID_L{lvl.level_number:D2}_collision"),
+                markers = BuildMarkers(marks, lvl.level_number),
                 nonVoid = nonVoid,
                 pillars = pillars,
                 walkable = walkable,
-                floorQuads = floors,
-                wallQuads = walls,
+                floorQuads = floorQuads,
+                wallQuads = wallQuads,
                 colliderQuads = colliders,
-                synthesizedPillarFaces = synth,
-                skippedSolidSolid = skipped
+                pillarBoundaryColliders = pillarColliders,
+                skippedSolidSolid = skippedSolid,
+                skippedTagZero = skippedTag0,
+                missingTiles = missing
             };
+            BuildRenderMesh(lvl, floors, ceilings, byTile, ref r);
             Connectivity(lvl, ref r);
             return r;
         }
 
-        static void EmitEdge(PidLevel lvl, MeshAccum vis, MeshAccum col, int x, int y, int slot,
-                             ref int walls, ref int colliders, ref int synth, ref int skipped)
+        static Vector2 V(float u, float v) => new Vector2(u, v);
+
+        static void EmitEdge(PidLevel lvl, PidTextureManifest manifest, int palette,
+                             Dictionary<int, MeshAccum> byTile, MeshAccum col,
+                             int x, int y, int slot,
+                             ref int wallQuads, ref int colliders, ref int pillarColliders,
+                             ref int skippedSolid, ref int skippedTag0, ref int missing)
         {
             int nx = slot == 0 ? x : x - 1;
             int ny = slot == 0 ? y - 1 : y;
 
-            bool aSolid = lvl.IsSolid(x, y);
-            bool bSolid = lvl.IsSolid(nx, ny);
-            int wt = lvl.WallType(x, y, slot);
+            bool aVoid = lvl.IsVoidAt(x, y), bVoid = lvl.IsVoidAt(nx, ny);
+            bool aBlk = lvl.IsBlocking(x, y), bBlk = lvl.IsBlocking(nx, ny);
+            int word = lvl.Word(x, y, slot);
+            int tag = PidConst.Tag(word);
 
-            // CASE 1: both sides solid. Nobody can stand on either side, so the face is
-            // never seen. Void sectors carry real wall data - 407 of them on Ground Floor
-            // - but only the ones touching the walkable region are visible. Without this
-            // clause Ground Floor emits 673 extra wall quads of unreachable
-            // authoring-tool residue.
-            if (aSolid && bSolid)
+            //Collision, decided independently of geometry since we don't actually have floor and ceiling collision
+            bool oneSideBlocks = aBlk != bBlk;
+            if (oneSideBlocks || (!aBlk && !bBlk && lvl.Blocks(x, y, slot)))
             {
-                if (wt != 0) skipped++;
+                EmitCollider(col, x, y, slot);
+                colliders++;
+                if (oneSideBlocks && tag == 0) pillarColliders++;
+            }
+
+            //Both sides void means the face is never seen and is culled: void sectors do carry real wall data, but only the ones areas the
+            //player sees are visable
+            if (aVoid && bVoid)
+            {
+                if (tag != 0) skippedSolid++;
                 return;
             }
 
-            // CASE 2: exactly one side solid. This is a boundary of the walkable region.
-            // Geometry MUST exist here or the player sees out of the world, and it is
-            // always a collider.
-            //
-            // For Void boundaries the map always supplies a wall: the census found zero
-            // open-to-void cases across all 25 levels, all 25,600 sectors. The boundary
-            // is sealed everywhere by the data itself.
-            //
-            // For PILLAR boundaries on the type-32 levels it does NOT. Every pillar-to-
-            // walkable edge on levels 0-6 and 16-24 carries wall type 0 - 1,541 game-wide,
-            // 49 on Ground Floor. Those faces have to be synthesized or every pillar is a
-            // hole you can see through. On the type-33 levels the map does supply them, as
-            // type 33: draws, does not collide - exactly a pillar side. Same authoring
-            // split as 32 versus 33.
-            if (aSolid != bSolid)
-            {
-                if (wt == 0) synth++;
-                EmitQuad(vis, x, y, slot, PidConst.HeightOf(wt));
-                EmitQuad(col, x, y, slot, PidConst.WallHeight);
-                walls++; colliders++;
-                return;
-            }
+            //Tag 0 is never drawn, because its void
+            if (tag == 0) { skippedTag0++; return; }
 
-            // CASE 3: both sides walkable. Draw if there is a wall; collide only if the
-            // export says so. Type 33 renders and never collides - that finding is
-            // load-bearing, and the arithmetic backs it: level 9 has 415 walkable tiles
-            // and only 91 open interior edges, so treating 33 as solid gives at least
-            // 415-91 = 324 fragments, which is exactly what the flood reports.
-            if (wt != 0) { EmitQuad(vis, x, y, slot, PidConst.HeightOf(wt)); walls++; }
-            if (lvl.Blocks(x, y, slot)) { EmitQuad(col, x, y, slot, PidConst.WallHeight); colliders++; }
+            int res = PidConst.Resource(word);
+            int s1 = PidConst.S1Index(word);
+
+            if (manifest?.Get(res)?.Get(s1) == null)
+            {
+                missing++;
+                if (!drawMissingTiles) return;
+            }
+            int key = manifest?.Get(res)?.Get(s1) == null
+                    ? TileKeyMissing : TileKey(res, s1, palette);
+
+            //Tile heights are pixel rows, not world units, since PID just stretches the art to fill the wall
+            EmitQuad(byTile, key, x, y, slot, tag);
+            wallQuads++;
         }
 
-        static void EmitQuad(MeshAccum m, int x, int y, int slot, float h)
+        public const int TileKeyMissing = -1;
+
+        //Draw something visible where a tile is missing
+        public static bool drawMissingTiles = false;
+
+        //Holdovers from when Unity was generating and drawing floors and ceilings, goes unused now but its too much work to take out
+        public static bool drawFloors = false;
+        public static bool drawCeilings = false;
+
+        //LUT palette has to be part of the key, or two levels using the same tile in different colors would share a material
+        public static int TileKey(int resource, int s1Index, int palette) =>
+            (resource * 1000 + s1Index) * 10 + palette;
+
+        public static void SplitTileKey(int key, out int resource, out int s1Index, out int palette)
         {
+            palette = key % 10;
+            int rest = key / 10;
+            resource = rest / 1000;
+            s1Index = rest % 1000;
+        }
+
+        //How much of the cell edge this wall actually covers. Always full height, just not always full width
+        static void TagSpan(int tag, out float t0, out float t1)
+        {
+            switch (tag)
+            {
+                case 2: t0 = 256f / 1024f; t1 = 1f; break;
+                case 3: t0 = 0f; t1 = 768f / 1024f; break;
+                case 4: t0 = 256f / 1024f; t1 = 768f / 1024f; break;
+                default: t0 = 0f; t1 = 1f; break;
+            }
+        }
+
+        //The angled bits where two walls meet, each one plugs the notch that a partial wall leaves at the corner
+        static readonly float[,] CornerPts =
+        {
+            { 768f,    0f, 1024f,  256f },   //slot 2 NE
+            { 256f,    0f,    0f,  256f },   //slot 3 NW
+            { 768f, 1024f, 1024f,  768f },   //slot 4 SE
+            {   0f,  768f,  256f, 1024f },   //slot 5 SW
+        };
+
+        static void EmitCorner(PidLevel lvl, PidTextureManifest manifest, int palette,
+                               Dictionary<int, MeshAccum> byTile,
+                               int x, int y, int slot,
+                               ref int wallQuads, ref int missing)
+        {
+            int word = lvl.Word(x, y, slot);
+            if (PidConst.Tag(word) == 0) return;
+
+            int res = PidConst.Resource(word);
+            int s1 = PidConst.S1Index(word);
+            bool have = manifest?.Get(res)?.Get(s1) != null;
+            if (!have) { missing++; if (!drawMissingTiles) return; }
+
+            int key = have ? TileKey(res, s1, palette) : TileKeyMissing;
+            if (!byTile.TryGetValue(key, out var m)) byTile[key] = m = new MeshAccum();
+
+            int r = slot - 2;
+            float ax = Mathf.Lerp(XW(x), XW(x + 1), CornerPts[r, 0] / 1024f);
+            float az = Mathf.Lerp(ZN(y), ZN(y + 1), CornerPts[r, 1] / 1024f);
+            float bx = Mathf.Lerp(XW(x), XW(x + 1), CornerPts[r, 2] / 1024f);
+            float bz = Mathf.Lerp(ZN(y), ZN(y + 1), CornerPts[r, 3] / 1024f);
+            float h = PidConst.WallHeight;
+
+            m.QuadBoth(new Vector3(ax, 0f, az), new Vector3(bx, 0f, bz),
+                       new Vector3(bx, h, bz), new Vector3(ax, h, az),
+                       V(0, 0), V(1, 0), V(1, 1), V(0, 1));
+            wallQuads++;
+        }
+
+        static void EmitQuad(Dictionary<int, MeshAccum> byTile, int key,
+                             int x, int y, int slot, int tag)
+        {
+            if (!byTile.TryGetValue(key, out var m)) byTile[key] = m = new MeshAccum();
+            float h = PidConst.WallHeight;
+
+            //The texture is pinned to the world, so a tag-4 wall shows the middle half of the tile
+            TagSpan(tag, out float t0, out float t1);
+
             if (slot == 0)
             {
-                // North edge lies in the Z = ZN(y) plane. Normal of (0,1,2,3) points +Z.
-                float x0 = XW(x), x1 = XW(x + 1), z = ZN(y);
-                m.QuadBoth(new Vector3(x0, 0f, z), new Vector3(x1, 0f, z),
-                           new Vector3(x1, h, z), new Vector3(x0, h, z));
+                float a = Mathf.Lerp(XW(x), XW(x + 1), t0);
+                float b = Mathf.Lerp(XW(x), XW(x + 1), t1);
+                float z = ZN(y);
+                m.QuadBoth(new Vector3(a, 0f, z), new Vector3(b, 0f, z),
+                           new Vector3(b, h, z), new Vector3(a, h, z),
+                           V(t0, 0), V(t1, 0), V(t1, 1), V(t0, 1));
             }
             else
             {
-                // West edge lies in the X = XW(x) plane. Normal of (0,1,2,3) points +X.
-                float xw = XW(x), zn = ZN(y), zs = ZN(y + 1);
-                m.QuadBoth(new Vector3(xw, 0f, zn), new Vector3(xw, 0f, zs),
-                           new Vector3(xw, h, zs), new Vector3(xw, h, zn));
+                float xw = XW(x);
+                float a = Mathf.Lerp(ZN(y), ZN(y + 1), t0);
+                float b = Mathf.Lerp(ZN(y), ZN(y + 1), t1);
+                m.QuadBoth(new Vector3(xw, 0f, a), new Vector3(xw, 0f, b),
+                           new Vector3(xw, h, b), new Vector3(xw, h, a),
+                           V(t0, 0), V(t1, 0), V(t1, 1), V(t0, 1));
             }
         }
 
-        /// Flood fill over walkable cells using the same blocking rule the colliders use.
-        /// A load-time assertion, not a feature: if the milestone's saves and ladders are
-        /// not all in one component, the walk test cannot pass and there is no point
-        /// launching it. This will earn its keep on levels 4 and 20-23, which are
-        /// genuinely split into void-separated regions linked only by transitions.
+        static void EmitCollider(MeshAccum col, int x, int y, int slot)
+        {
+            //Colliders are always full height regardless of the drawn tile
+            float h = PidConst.WallHeight;
+            if (slot == 0)
+            {
+                float x0 = XW(x), x1 = XW(x + 1), z = ZN(y);
+                col.QuadBoth(new Vector3(x0, 0f, z), new Vector3(x1, 0f, z),
+                             new Vector3(x1, h, z), new Vector3(x0, h, z),
+                             V(0, 0), V(1, 0), V(1, 1), V(0, 1));
+            }
+            else
+            {
+                float xw = XW(x), zn = ZN(y), zs = ZN(y + 1);
+                col.QuadBoth(new Vector3(xw, 0f, zn), new Vector3(xw, 0f, zs),
+                             new Vector3(xw, h, zs), new Vector3(xw, h, zn),
+                             V(0, 0), V(1, 0), V(1, 1), V(0, 1));
+            }
+        }
+
+        static Mesh ToMesh(MeshAccum m, string name)
+        {
+            var mesh = new Mesh { name = name };
+            mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+            mesh.SetVertices(m.verts);
+            mesh.SetNormals(m.norms);
+            mesh.SetUVs(0, m.uvs);
+            mesh.SetTriangles(m.tris, 0);
+            mesh.RecalculateBounds();
+            return mesh;
+        }
+
+        //0 is floors, 1 is ceilings, then each wall type has its own number
+        //Each tile is its own seperate texture, so each needs its own material
+        static void BuildRenderMesh(PidLevel lvl, MeshAccum floors, MeshAccum ceilings,
+                                    Dictionary<int, MeshAccum> byTile, ref Result r)
+        {
+            var verts = new List<Vector3>(floors.verts);
+            var norms = new List<Vector3>(floors.norms);
+            var uvs = new List<Vector2>(floors.uvs);
+            var subs = new List<List<int>> { new List<int>(floors.tris) };
+            var keys = new List<int>();
+
+            {
+                int b = verts.Count;
+                verts.AddRange(ceilings.verts);
+                norms.AddRange(ceilings.norms);
+                uvs.AddRange(ceilings.uvs);
+                var t = new List<int>(ceilings.tris.Count);
+                foreach (int i in ceilings.tris) t.Add(i + b);
+                subs.Add(t);
+            }
+
+            foreach (var kv in byTile)
+            {
+                int b = verts.Count;
+                verts.AddRange(kv.Value.verts);
+                norms.AddRange(kv.Value.norms);
+                uvs.AddRange(kv.Value.uvs);
+                var t = new List<int>(kv.Value.tris.Count);
+                foreach (int i in kv.Value.tris) t.Add(i + b);
+                subs.Add(t);
+                keys.Add(kv.Key);
+            }
+
+            var mesh = new Mesh { name = $"PID_L{lvl.level_number:D2}_render" };
+            mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+            mesh.SetVertices(verts);
+            mesh.SetNormals(norms);
+            mesh.SetUVs(0, uvs);
+            mesh.subMeshCount = subs.Count;
+            for (int i = 0; i < subs.Count; i++) mesh.SetTriangles(subs[i], i);
+            mesh.RecalculateBounds();
+
+            r.render = mesh;
+            r.submeshTileKey = keys;
+        }
+
+        static Dictionary<int, Mesh> BuildMarkers(Dictionary<int, MeshAccum> marks, int lvlNum)
+        {
+            var outp = new Dictionary<int, Mesh>();
+            foreach (var kv in marks)
+                outp[kv.Key] = ToMesh(kv.Value, $"PID_L{lvlNum:D2}_mark{kv.Key}");
+            return outp;
+        }
+
         static void Connectivity(PidLevel lvl, ref Result r)
         {
             int n = PidConst.Grid * PidConst.Grid;
@@ -380,11 +648,10 @@ namespace Pid
             for (int start = 0; start < n; start++)
             {
                 int sx = start % PidConst.Grid, sy = start / PidConst.Grid;
-                if (lvl.IsSolid(sx, sy) || comp[start] != -1) continue;
+                if (lvl.IsBlocking(sx, sy) || comp[start] != -1) continue;
 
                 int size = 0;
-                stack.Push(start);
-                comp[start] = id;
+                stack.Push(start); comp[start] = id;
                 while (stack.Count > 0)
                 {
                     int cur = stack.Pop(); size++;
@@ -402,15 +669,6 @@ namespace Pid
             r.largestComponent = largest;
             r.unreachable = new List<string>();
 
-            // A level being split into several walkable regions is NORMAL and intended.
-            // Level 23 has four sealed 13-tile pods, each holding four ladders, on a level
-            // called "Where Only Fools Dare Tread". Level 20 has an isolated 3x3 room that
-            // two teleporters on Happy Happy, Carnage Carnage drop into - a designed trap.
-            // Across the game 51 saves and ladders sit outside their level's largest
-            // component, and none of that is a bug.
-            //
-            // So the question is not "is everything in one piece", it is "can every piece
-            // be entered". A component containing no arrival coordinate has no way in.
             var withArrival = new HashSet<int>();
             if (lvl.arrivals != null)
                 foreach (var a in lvl.arrivals)
@@ -425,9 +683,7 @@ namespace Pid
 
             for (int c = 0; c < id; c++)
             {
-                if (withArrival.Contains(c)) continue;
-                if (c == largestId) continue;   // entered by whatever route brought you here
-
+                if (withArrival.Contains(c) || c == largestId) continue;
                 int saves = 0, ladders = 0, sx = -1, sy = -1;
                 for (int i = 0; i < n; i++)
                 {
@@ -445,11 +701,10 @@ namespace Pid
         static void TryStep(PidLevel lvl, int[] comp, Stack<int> stack, int id,
                             int ax, int ay, int bx, int by)
         {
-            if (!lvl.InBounds(bx, by) || lvl.IsSolid(bx, by)) return;
+            if (!lvl.InBounds(bx, by) || lvl.IsBlocking(bx, by)) return;
             int bi = by * PidConst.Grid + bx;
             if (comp[bi] != -1) return;
 
-            // The blocking edge is always described by the cell to the south or east.
             int ox = bx > ax ? bx : ax;
             int oy = by > ay ? by : ay;
             int slot = (ay != by) ? 0 : 1;
